@@ -22,19 +22,6 @@ pub struct ApResolveData {
     spclient: Vec<String>,
 }
 
-impl ApResolveData {
-    // These addresses probably do some geo-location based traffic management or at least DNS-based
-    // load balancing. They are known to fail when the normal resolvers are up, so that's why they
-    // should only be used as fallback.
-    fn fallback() -> Self {
-        Self {
-            accesspoint: vec![String::from("ap.spotify.com:443")],
-            dealer: vec![String::from("dealer.spotify.com:443")],
-            spclient: vec![String::from("spclient.wg.spotify.com:443")],
-        }
-    }
-}
-
 impl AccessPoints {
     fn is_any_empty(&self) -> bool {
         self.accesspoint.is_empty() || self.dealer.is_empty() || self.spclient.is_empty()
@@ -94,29 +81,12 @@ impl ApResolver {
         Ok(data)
     }
 
-    async fn apresolve(&self) {
-        let result = self.try_apresolve().await;
-
-        self.lock(|inner| {
-            let (data, error) = match result {
-                Ok(data) => (data, None),
-                Err(e) => (ApResolveData::default(), Some(e)),
-            };
-
-            inner.data = self.parse_resolve_to_access_points(data);
-
-            if inner.data.is_any_empty() {
-                warn!("Failed to resolve all access points, using fallbacks");
-                if let Some(error) = error {
-                    warn!("Resolve access points error: {error}");
-                }
-
-                let fallback = self.parse_resolve_to_access_points(ApResolveData::fallback());
-                inner.data.accesspoint.extend(fallback.accesspoint);
-                inner.data.dealer.extend(fallback.dealer);
-                inner.data.spclient.extend(fallback.spclient);
-            }
-        })
+    async fn apresolve(&self) -> Result<(), Error> {
+        // The embedding transport owns HTTP admission. A denied or invalid
+        // response must never authorize a native AP/dealer fallback connection.
+        let data = self.try_apresolve().await?;
+        self.lock(|inner| inner.data = self.parse_resolve_to_access_points(data));
+        Ok(())
     }
 
     fn is_any_empty(&self) -> bool {
@@ -124,8 +94,10 @@ impl ApResolver {
     }
 
     pub async fn resolve(&self, endpoint: &str) -> Result<SocketAddress, Error> {
+        // A denied HTTP resolution must not become an allowed fallback socket connection.
+        self.session().config().check_network_permission()?;
         if self.is_any_empty() {
-            self.apresolve().await;
+            self.apresolve().await?;
         }
 
         self.lock(|inner| {

@@ -88,7 +88,7 @@ fn visit_dir(dir: &Path, accumulator: &mut LocalFileLookup) -> io::Result<()> {
     Ok(())
 }
 
-fn get_uri_from_file(audio_path: &Path, file_extension: &str) -> Result<SpotifyUri, Error> {
+pub fn get_uri_from_file(audio_path: &Path, file_extension: &str) -> Result<SpotifyUri, Error> {
     let src = File::open(audio_path)?;
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
 

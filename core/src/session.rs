@@ -3,7 +3,6 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    process::exit,
     sync::{Arc, OnceLock, RwLock, Weak},
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -131,7 +130,7 @@ pub struct Session(Arc<SessionInternal>);
 
 impl Session {
     pub fn new(config: SessionConfig, cache: Option<Cache>) -> Self {
-        let http_client = HttpClient::new(config.proxy.as_ref());
+        let http_client = HttpClient::new(&config);
 
         debug!("new Session");
 
@@ -165,6 +164,7 @@ impl Session {
         access_point: &SocketAddress,
         credentials: Credentials,
     ) -> Result<(Credentials, Transport), Error> {
+        self.config().check_network_permission()?;
         const MAX_RETRIES: u8 = 1;
         let mut transport = connection::connect_with_retry(
             &access_point.0,
@@ -208,6 +208,7 @@ impl Session {
         credentials: Credentials,
         store_credentials: bool,
     ) -> Result<(), Error> {
+        self.config().check_network_permission()?;
         // There currently happen to be 6 APs but anything will do to avoid an infinite loop.
         const MAX_AP_TRIES: u8 = 6;
         let mut num_ap_tries = 0;
@@ -364,11 +365,9 @@ impl Session {
     fn check_catalogue(attributes: &UserAttributes) {
         if let Some(account_type) = attributes.get("type") {
             if account_type != "premium" {
-                error!("librespot does not support {account_type:?} accounts.");
-                info!("Please support Spotify and your artists and sign up for a premium account.");
-
-                // TODO: logout instead of exiting
-                exit(1);
+                debug!(
+                    "Received account type {account_type:?}; retaining server attributes and restrictions"
+                );
             }
         }
     }

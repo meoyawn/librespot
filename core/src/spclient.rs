@@ -10,6 +10,7 @@ use crate::{
     config::SessionConfig,
     dealer::protocol::TransferOptions,
     error::ErrorKind,
+    http_client::HttpRequestFuture,
     protocol::{
         autoplay_context_request::AutoplayContextRequest,
         clienttoken_http::{
@@ -34,7 +35,6 @@ use hyper::{
     HeaderMap, Method, Request,
     header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, RANGE},
 };
-use hyper_util::client::legacy::ResponseFuture;
 use protobuf::{Enum, EnumOrUnknown, Message, MessageFull};
 use rand::RngCore;
 use serde::Serialize;
@@ -783,7 +783,7 @@ impl SpClient {
         cdn_url: U,
         offset: usize,
         length: usize,
-    ) -> Result<IntoStream<ResponseFuture>, Error>
+    ) -> Result<IntoStream<HttpRequestFuture>, Error>
     where
         U: TryInto<Uri>,
         <U as TryInto<Uri>>::Error: Into<http::Error>,

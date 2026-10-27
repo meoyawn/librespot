@@ -235,10 +235,13 @@ fn get_covers(covers: Images, image_url: String) -> Vec<CoverImage> {
 
 fn allowed_for_user(user_data: &UserData, restrictions: &Restrictions) -> AudioItemAvailability {
     let country = &user_data.country;
-    let user_catalogue = match user_data.attributes.get("catalogue") {
-        Some(catalogue) => catalogue,
-        None => "premium",
-    };
+    // Unknown product data must not silently grant Premium catalogue availability.
+    // Keep the server's catalogue verbatim rather than infer it from an account tier.
+    let user_catalogue = user_data
+        .attributes
+        .get("catalogue")
+        .filter(|catalogue| !catalogue.is_empty())
+        .ok_or(UnavailabilityReason::NoData)?;
 
     for premium_restriction in restrictions.iter().filter(|restriction| {
         restriction
@@ -296,4 +299,57 @@ fn available_for_user(
     available(availability)?;
     allowed_for_user(user_data, restrictions)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::restriction::{Restriction, RestrictionCatalogues, RestrictionType};
+
+    #[test]
+    fn account_catalogue_is_required_and_server_restrictions_use_the_actual_catalogue() {
+        let restrictions = Restrictions(vec![
+            Restriction {
+                catalogues: RestrictionCatalogues(Vec::new()),
+                restriction_type: RestrictionType::default(),
+                catalogue_strs: vec!["premium".to_owned()],
+                countries_allowed: Some(vec!["US".to_owned()]),
+                countries_forbidden: None,
+            },
+            Restriction {
+                catalogues: RestrictionCatalogues(Vec::new()),
+                restriction_type: RestrictionType::default(),
+                catalogue_strs: vec!["free".to_owned()],
+                countries_allowed: Some(vec!["CA".to_owned()]),
+                countries_forbidden: None,
+            },
+        ]);
+        let mut user = UserData {
+            country: "US".to_owned(),
+            ..UserData::default()
+        };
+        user.attributes.insert("type".to_owned(), "free".to_owned());
+        assert!(matches!(
+            available_for_user(&user, &Availabilities::default(), &restrictions),
+            Err(UnavailabilityReason::NoData)
+        ));
+        user.attributes
+            .insert("catalogue".to_owned(), String::new());
+        assert!(matches!(
+            available_for_user(&user, &Availabilities::default(), &restrictions),
+            Err(UnavailabilityReason::NoData)
+        ));
+        user.attributes
+            .insert("catalogue".to_owned(), "free".to_owned());
+        assert!(matches!(
+            available_for_user(&user, &Availabilities::default(), &restrictions),
+            Err(UnavailabilityReason::NotWhitelisted)
+        ));
+        user.country = "CA".to_owned();
+        assert!(available_for_user(&user, &Availabilities::default(), &restrictions).is_ok());
+        user.country = "US".to_owned();
+        user.attributes
+            .insert("catalogue".to_owned(), "premium".to_owned());
+        assert!(available_for_user(&user, &Availabilities::default(), &restrictions).is_ok());
+    }
 }

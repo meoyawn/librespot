@@ -1,4 +1,3 @@
-use std::process::exit;
 use std::thread;
 use std::time::Duration;
 
@@ -148,13 +147,10 @@ fn create_sink(
     format: AudioFormat,
 ) -> Result<(rodio::Sink, rodio::OutputStream), RodioError> {
     let cpal_device = match device.as_deref() {
-        Some("?") => match list_outputs(host) {
-            Ok(()) => exit(0),
-            Err(e) => {
-                error!("{e}");
-                exit(1);
-            }
-        },
+        Some("?") => {
+            list_outputs(host)?;
+            return Err(RodioError::DeviceNotAvailable("? is a listing request, not an output device".into()));
+        }
         Some(device_name) => {
             // Ignore devices for which getting name fails, or format doesn't match
             host.output_devices()?
@@ -214,18 +210,23 @@ fn create_sink(
 }
 
 pub fn open(host: cpal::Host, device: Option<String>, format: AudioFormat) -> RodioSink {
+    try_open(host, device, format).expect("Failed to open Rodio output")
+}
+
+/// Fallible entry point for embedded clients, which must never exit their host process.
+pub fn try_open(host: cpal::Host, device: Option<String>, format: AudioFormat) -> Result<RodioSink, RodioError> {
     info!(
         "Using Rodio sink with format {format:?} and cpal host: {}",
         host.id().name()
     );
 
-    let (sink, stream) = create_sink(&host, device, format).unwrap();
+    let (sink, stream) = create_sink(&host, device, format)?;
 
     debug!("Rodio sink was created");
-    RodioSink {
+    Ok(RodioSink {
         rodio_sink: sink,
         _stream: stream,
-    }
+    })
 }
 
 impl Sink for RodioSink {

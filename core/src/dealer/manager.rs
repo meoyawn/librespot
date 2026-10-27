@@ -145,6 +145,7 @@ impl DealerManager {
     }
 
     pub async fn start(&self) -> Result<(), Error> {
+        self.session().config().check_network_permission()?;
         debug!("Launching dealer");
 
         let session = self.session();

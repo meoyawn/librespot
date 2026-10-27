@@ -13,14 +13,17 @@ use std::{
 };
 
 use futures_util::{StreamExt, TryFutureExt, future::IntoStream};
-use hyper::{Response, StatusCode, body::Incoming, header::CONTENT_RANGE};
-use hyper_util::client::legacy::ResponseFuture;
+use hyper::{Response, StatusCode, header::CONTENT_RANGE};
 
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
-use librespot_core::{Error, FileId, Session, cdn_url::CdnUrl};
+use librespot_core::{
+    Error, FileId, Session,
+    cdn_url::CdnUrl,
+    http_client::{HttpRequestFuture, HttpResponseBody},
+};
 
 use self::receive::audio_file_fetch;
 
@@ -136,8 +139,8 @@ pub enum AudioFile {
 
 #[derive(Debug)]
 pub struct StreamingRequest {
-    streamer: IntoStream<ResponseFuture>,
-    initial_response: Option<Response<Incoming>>,
+    streamer: IntoStream<HttpRequestFuture>,
+    initial_response: Option<Response<HttpResponseBody>>,
     offset: usize,
     length: usize,
 }

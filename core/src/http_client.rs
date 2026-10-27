@@ -1,5 +1,9 @@
 use std::{
-    sync::OnceLock,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -9,29 +13,13 @@ use governor::{
     Quota, RateLimiter, clock::MonotonicClock, middleware::NoOpMiddleware,
     state::keyed::DefaultKeyedStateStore,
 };
-use http::{Uri, header::HeaderValue};
-use http_body_util::{BodyExt, Full};
-use hyper::{HeaderMap, Request, Response, StatusCode, body::Incoming, header::USER_AGENT};
-use hyper_proxy2::{Intercept, Proxy, ProxyConnector};
-use hyper_util::{
-    client::legacy::{Client, ResponseFuture, connect::HttpConnector},
-    rt::TokioExecutor,
-};
+use http::header::HeaderValue;
+use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
+use hyper::{HeaderMap, Request, Response, StatusCode, header::USER_AGENT};
 use nonzero_ext::nonzero;
 use thiserror::Error;
-use url::Url;
 
-#[cfg(all(feature = "__rustls", not(feature = "native-tls")))]
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-#[cfg(all(feature = "native-tls", not(feature = "__rustls")))]
-use hyper_tls::HttpsConnector;
-
-use crate::{
-    Error,
-    config::{OS, os_version},
-    date::Date,
-    version::{FALLBACK_USER_AGENT, VERSION_STRING, spotify_version},
-};
+use crate::{Error, config::SessionConfig, date::Date};
 
 // The 30 seconds interval is documented by Spotify, but the calls per interval
 // is a guesstimate and probably subject to licensing (purchasing extra calls)
@@ -92,43 +80,69 @@ impl From<HttpClientError> for Error {
     }
 }
 
-type HyperClient = Client<ProxyConnector<HttpsConnector<HttpConnector>>, Full<bytes::Bytes>>;
+/// Streaming HTTP response supplied by the embedding application's transport.
+/// Body frames and failures propagate without collecting the entire audio file.
+pub type HttpResponseBody = UnsyncBoxBody<Bytes, Error>;
+
+pub struct HttpRequestFuture(
+    Pin<Box<dyn Future<Output = Result<Response<HttpResponseBody>, Error>> + Send>>,
+);
+
+impl HttpRequestFuture {
+    pub fn new(
+        future: impl Future<Output = Result<Response<HttpResponseBody>, Error>> + Send + 'static,
+    ) -> Self {
+        Self(Box::pin(future))
+    }
+}
+
+impl fmt::Debug for HttpRequestFuture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HttpRequestFuture")
+    }
+}
+
+impl Future for HttpRequestFuture {
+    type Output = Result<Response<HttpResponseBody>, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.as_mut().poll(context)
+    }
+}
+
+/// A production callback boundary for Dart's existing HTTP implementation.
+/// The adapter owns the wire transport, proxy/TLS policy and cancellation of its stream.
+/// This structured request does not assert byte-identical native wire formatting.
+#[derive(Clone)]
+pub struct HttpTransport(Arc<dyn Fn(Request<Bytes>) -> HttpRequestFuture + Send + Sync>);
+
+impl HttpTransport {
+    pub fn new<F, Fut>(request: F) -> Self
+    where
+        F: Fn(Request<Bytes>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<HttpResponseBody>, Error>> + Send + 'static,
+    {
+        Self(Arc::new(move |input| {
+            HttpRequestFuture::new(request(input))
+        }))
+    }
+}
+
+impl fmt::Debug for HttpTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HttpTransport")
+    }
+}
 
 pub struct HttpClient {
-    user_agent: HeaderValue,
-    proxy_url: Option<Url>,
-    hyper_client: OnceLock<HyperClient>,
+    config: SessionConfig,
 
     rate_limiter:
         RateLimiter<String, DefaultKeyedStateStore<String>, MonotonicClock, NoOpMiddleware>,
 }
 
 impl HttpClient {
-    pub fn new(proxy_url: Option<&Url>) -> Self {
-        let zero_str = String::from("0");
-        let os_version = os_version();
-
-        let (spotify_platform, os_version) = match OS {
-            "android" => ("Android", os_version),
-            "ios" => ("iOS", os_version),
-            "macos" => ("OSX", zero_str),
-            "windows" => ("Win32", zero_str),
-            _ => ("Linux", zero_str),
-        };
-
-        let user_agent_str = &format!(
-            "Spotify/{} {}/{} ({})",
-            spotify_version(),
-            spotify_platform,
-            os_version,
-            VERSION_STRING
-        );
-
-        let user_agent = HeaderValue::from_str(user_agent_str).unwrap_or_else(|err| {
-            error!("Invalid user agent <{user_agent_str}>: {err}");
-            HeaderValue::from_static(FALLBACK_USER_AGENT)
-        });
-
+    pub fn new(config: &SessionConfig) -> Self {
         let replenish_interval_ns =
             RATE_LIMIT_INTERVAL.as_nanos() / RATE_LIMIT_CALLS_PER_INTERVAL as u128;
         let quota = Quota::with_period(Duration::from_nanos(replenish_interval_ns as u64))
@@ -137,48 +151,12 @@ impl HttpClient {
         let rate_limiter = RateLimiter::keyed(quota);
 
         Self {
-            user_agent,
-            proxy_url: proxy_url.cloned(),
-            hyper_client: OnceLock::new(),
+            config: config.clone(),
             rate_limiter,
         }
     }
 
-    fn try_create_hyper_client(proxy_url: Option<&Url>) -> Result<HyperClient, Error> {
-        // configuring TLS is expensive and should be done once per process
-
-        #[cfg(all(feature = "__rustls", not(feature = "native-tls")))]
-        let https_connector = {
-            #[cfg(feature = "rustls-tls-native-roots")]
-            let tls = HttpsConnectorBuilder::new().with_native_roots()?;
-            #[cfg(feature = "rustls-tls-webpki-roots")]
-            let tls = HttpsConnectorBuilder::new().with_webpki_roots();
-            tls.https_or_http().enable_http1().enable_http2().build()
-        };
-
-        #[cfg(all(feature = "native-tls", not(feature = "__rustls")))]
-        let https_connector = HttpsConnector::new();
-
-        // When not using a proxy a dummy proxy is configured that will not intercept any traffic.
-        // This prevents needing to carry the Client Connector generics through the whole project
-        let proxy = match &proxy_url {
-            Some(proxy_url) => Proxy::new(Intercept::All, proxy_url.to_string().parse()?),
-            None => Proxy::new(Intercept::None, Uri::from_static("0.0.0.0")),
-        };
-        let proxy_connector = ProxyConnector::from_proxy(https_connector, proxy)?;
-
-        let client = Client::builder(TokioExecutor::new())
-            .http2_adaptive_window(true)
-            .build(proxy_connector);
-        Ok(client)
-    }
-
-    fn hyper_client(&self) -> &HyperClient {
-        self.hyper_client
-            .get_or_init(|| Self::try_create_hyper_client(self.proxy_url.as_ref()).unwrap())
-    }
-
-    pub async fn request(&self, req: Request<Bytes>) -> Result<Response<Incoming>, Error> {
+    pub async fn request(&self, req: Request<Bytes>) -> Result<Response<HttpResponseBody>, Error> {
         debug!("Requesting {}", req.uri());
 
         // `Request` does not implement `Clone` because its `Body` may be a single-shot stream.
@@ -226,13 +204,29 @@ impl HttpClient {
         Ok(response.into_body().collect().await?.to_bytes())
     }
 
-    pub fn request_stream(&self, req: Request<Bytes>) -> Result<IntoStream<ResponseFuture>, Error> {
+    pub fn request_stream(
+        &self,
+        req: Request<Bytes>,
+    ) -> Result<IntoStream<HttpRequestFuture>, Error> {
         Ok(self.request_fut(req)?.into_stream())
     }
 
-    pub fn request_fut(&self, mut req: Request<Bytes>) -> Result<ResponseFuture, Error> {
-        let headers_mut = req.headers_mut();
-        headers_mut.insert(USER_AGENT, self.user_agent.clone());
+    pub fn request_fut(&self, mut req: Request<Bytes>) -> Result<HttpRequestFuture, Error> {
+        let user_agent = self.config.network_user_agent()?;
+        // Do not silently overwrite a caller's identity or generate a librespot fallback.
+        if req
+            .headers()
+            .get_all(USER_AGENT)
+            .iter()
+            .any(|value| value != user_agent)
+        {
+            return Err(Error::failed_precondition(
+                "HTTP User-Agent does not match configured native identity",
+            ));
+        }
+        if !req.headers().contains_key(USER_AGENT) {
+            req.headers_mut().insert(USER_AGENT, user_agent);
+        }
 
         // For rate limiting we cannot *just* depend on Spotify sending us HTTP/429
         // Retry-After headers. For example, when there is a service interruption
@@ -253,7 +247,11 @@ impl HttpClient {
             ))
         })?;
 
-        Ok(self.hyper_client().request(req.map(Full::new)))
+        let transport =
+            self.config.http_transport.as_ref().ok_or_else(|| {
+                Error::failed_precondition("embedding HTTP transport is required")
+            })?;
+        Ok((transport.0)(req))
     }
 
     pub fn get_retry_after(headers: &HeaderMap<HeaderValue>) -> Option<Duration> {

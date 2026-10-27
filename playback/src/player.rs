@@ -6,7 +6,6 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     mem,
     pin::Pin,
-    process::exit,
     sync::Mutex,
     sync::{
         Arc,
@@ -774,7 +773,7 @@ impl PlayerState {
             Playing { .. } => true,
             Invalid => {
                 error!("PlayerState::is_playing in invalid state");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -803,7 +802,7 @@ impl PlayerState {
             } => Some(decoder),
             Invalid => {
                 error!("PlayerState::decoder in invalid state");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -842,7 +841,7 @@ impl PlayerState {
             }
             _ => {
                 error!("Called playing_to_end_of_track in non-playing state: {new_state:?}");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -884,7 +883,7 @@ impl PlayerState {
             }
             _ => {
                 error!("PlayerState::paused_to_playing in invalid state: {new_state:?}");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -925,7 +924,7 @@ impl PlayerState {
             }
             _ => {
                 error!("PlayerState::playing_to_paused in invalid state: {new_state:?}");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -1405,7 +1404,7 @@ impl Future for PlayerInternal {
                             );
                             if let PlayerState::Loading { .. } = self.state {
                                 error!("The state wasn't changed by start_playback()");
-                                exit(1);
+                                panic!("Embedded player encountered an invalid state");
                             }
                         }
                         Poll::Ready(Err(e)) => {
@@ -1582,7 +1581,7 @@ impl Future for PlayerInternal {
                     }
                 } else {
                     error!("PlayerInternal poll: Invalid PlayerState");
-                    exit(1);
+                    panic!("Embedded player encountered an invalid state");
                 };
             }
 
@@ -1661,7 +1660,7 @@ impl PlayerInternal {
                     }
                     Err(e) => {
                         error!("{e}");
-                        exit(1);
+                        panic!("Embedded player encountered an invalid state");
                     }
                 }
             }
@@ -1711,7 +1710,7 @@ impl PlayerInternal {
             PlayerState::Stopped => (),
             PlayerState::Invalid => {
                 error!("PlayerInternal::handle_player_stop in invalid state");
-                exit(1);
+                panic!("Embedded player encountered an invalid state");
             }
         }
     }
@@ -1896,7 +1895,7 @@ impl PlayerInternal {
                     })
                 } else {
                     error!("PlayerInternal handle_packet: Invalid PlayerState");
-                    exit(1);
+                    panic!("Embedded player encountered an invalid state");
                 }
             }
         }

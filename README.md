@@ -5,6 +5,16 @@
 Current maintainers are [listed on GitHub](https://github.com/orgs/librespot-org/people).
 
 # librespot
+
+This fork's `flutter-player` branch supplies an in-process playback engine for
+the Spotify Flutter reconstruction. HTTP is delegated to the embedding app and
+networking is disabled by default. It exposes local-file playback and fallible
+audio-device creation without exiting the host process.
+
+Free accounts are a compatibility target in this fork. The upstream account
+process exit and implicit Premium catalogue fallback are removed; actual server
+catalogue restrictions remain authoritative. Free-account streaming and advert
+scheduling are not yet complete. The remaining README describes upstream.
 *librespot* is an open source client library for Spotify. It enables applications to use Spotify's service to control and play music via various backends, and to act as a Spotify Connect receiver. It is an alternative to the official and [now deprecated](https://pyspotify.mopidy.com/en/latest/#libspotify-s-deprecation) closed-source `libspotify`. Additionally, it will provide extra features which are not available in the official library.
 
 _Note: librespot only works with Spotify Premium. This will remain the case. We will not support any features to make librespot compatible with free accounts, such as limited skips and adverts._

@@ -3,6 +3,8 @@ use std::{fmt, path::PathBuf, str::FromStr};
 use librespot_protocol::devices::DeviceType as ProtoDeviceType;
 use url::Url;
 
+use crate::{Error, http_client::HttpTransport};
+
 pub(crate) const KEYMASTER_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 pub(crate) const ANDROID_CLIENT_ID: &str = "9a8d2f0ce77a4e248bb71fefcb557637";
 pub(crate) const IOS_CLIENT_ID: &str = "58bd3c95768941ea9eb4350aaa033eb3";
@@ -29,9 +31,47 @@ pub struct SessionConfig {
     pub ap_port: Option<u16>,
     pub tmp_dir: PathBuf,
     pub autoplay: Option<bool>,
+    /// The embedding application must opt in before HTTP, AP, or dealer networking.
+    pub network_enabled: bool,
+    /// Exact native User-Agent value. No librespot identity or fallback is generated.
+    pub http_user_agent: Option<String>,
+    /// HTTP is delegated to the embedding application, including CDN response streams.
+    /// There is no independent native HTTP fallback when this is absent.
+    pub http_transport: Option<HttpTransport>,
 }
 
 impl SessionConfig {
+    pub fn check_network_permission(&self) -> Result<(), Error> {
+        self.network_user_agent().map(drop)
+    }
+
+    pub(crate) fn network_user_agent(&self) -> Result<http::HeaderValue, Error> {
+        if !self.network_enabled {
+            return Err(Error::failed_precondition(
+                "embedded session networking is disabled",
+            ));
+        }
+        if self.client_id.is_empty() || self.device_id.is_empty() {
+            return Err(Error::failed_precondition(
+                "explicit client and device identity are required",
+            ));
+        }
+        let value = self
+            .http_user_agent
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Error::failed_precondition("exact native HTTP User-Agent is required")
+            })?;
+        let user_agent = http::HeaderValue::from_str(value)?;
+        if self.http_transport.is_none() {
+            return Err(Error::failed_precondition(
+                "embedding HTTP transport is required",
+            ));
+        }
+        Ok(user_agent)
+    }
+
     pub(crate) fn default_for_os(os: &str) -> Self {
         let device_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
         let client_id = match os {
@@ -48,6 +88,9 @@ impl SessionConfig {
             ap_port: None,
             tmp_dir: std::env::temp_dir(),
             autoplay: None,
+            network_enabled: false,
+            http_user_agent: None,
+            http_transport: None,
         }
     }
 }

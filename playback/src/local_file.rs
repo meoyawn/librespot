@@ -20,7 +20,8 @@ use symphonia::core::{
 // https://community.spotify.com/t5/FAQs/Local-Files/ta-p/5186118
 //
 // There are some indications online that FLAC is supported, so check for this as well.
-const SUPPORTED_FILE_EXTENSIONS: &[&str; 4] = &["mp3", "mp4", "m4p", "flac"];
+// The embedded player's Symphonia build also decodes Ogg/Vorbis.
+const SUPPORTED_FILE_EXTENSIONS: &[&str; 5] = &["mp3", "mp4", "m4p", "flac", "ogg"];
 
 #[derive(Default)]
 pub struct LocalFileLookup(HashMap<SpotifyUri, PathBuf>);
@@ -35,9 +36,15 @@ pub fn create_local_file_lookup(directories: &[PathBuf]) -> LocalFileLookup {
     let mut lookup = LocalFileLookup(HashMap::new());
 
     for path in directories {
+        // File-picker access may cover only one file, without permission to
+        // enumerate its parent directory.
+        if path.is_file() {
+            index_file(path, &mut lookup);
+            continue;
+        }
         if !path.is_dir() {
             warn!(
-                "Ignoring local file source {}: not a directory",
+                "Ignoring local file source {}: not a file or directory",
                 path.display()
             );
             continue;
@@ -61,31 +68,30 @@ fn visit_dir(dir: &Path, accumulator: &mut LocalFileLookup) -> io::Result<()> {
         if path.is_dir() {
             visit_dir(&path, accumulator)?;
         } else {
-            let Some(file_extension) = path.extension().and_then(|e| e.to_str()) else {
-                continue;
-            };
-
-            let lowercase_extension = file_extension.to_lowercase();
-
-            if SUPPORTED_FILE_EXTENSIONS.contains(&lowercase_extension.as_str()) {
-                let uri = match get_uri_from_file(path.as_path(), file_extension) {
-                    Ok(uri) => uri,
-                    Err(e) => {
-                        warn!(
-                            "Failed to determine URI of local file {}: {}",
-                            path.display(),
-                            e
-                        );
-                        continue;
-                    }
-                };
-
-                accumulator.0.insert(uri, path);
-            }
+            index_file(&path, accumulator);
         }
     }
 
     Ok(())
+}
+
+fn index_file(path: &Path, accumulator: &mut LocalFileLookup) {
+    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
+        return;
+    };
+    if !SUPPORTED_FILE_EXTENSIONS.contains(&extension.to_lowercase().as_str()) {
+        return;
+    }
+    match get_uri_from_file(path, extension) {
+        Ok(uri) => {
+            accumulator.0.insert(uri, path.to_path_buf());
+        }
+        Err(error) => warn!(
+            "Failed to determine URI of local file {}: {}",
+            path.display(),
+            error
+        ),
+    }
 }
 
 pub fn get_uri_from_file(audio_path: &Path, file_extension: &str) -> Result<SpotifyUri, Error> {
